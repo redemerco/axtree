@@ -10,6 +10,7 @@ Uso:
   axtree.py <app> --press eN   # ejecutar una acción (default AXPress)
   axtree.py <app> --refresh    # ignorar el cache del daemon y re-caminar el árbol
   axtree.py --list             # apps corriendo con UI
+  axtree.py --daemon-stop      # apagar el daemon (shutdown limpio, borra el socket)
 
 Salida: una línea por elemento — rol "label" value=… (acciones) [eN]
 
@@ -63,6 +64,7 @@ def build_parser():
     ap.add_argument("--under", metavar="EID", help="dumpear solo el subárbol de ese elemento (renumera los eN)")
     ap.add_argument("--refresh", action="store_true", help="ignorar cache del daemon, re-caminar el árbol")
     ap.add_argument("--no-daemon", action="store_true", help="ignorar el daemon aunque esté corriendo")
+    ap.add_argument("--daemon-stop", action="store_true", help="apagar el daemon corriendo (shutdown limpio, borra el socket)")
     return ap
 
 
@@ -146,6 +148,13 @@ def run_standalone(args):
 
 def main():
     args = build_parser().parse_args()
+
+    if args.daemon_stop:
+        resp = daemon_request({"cmd": "shutdown"})
+        if resp and resp.get("ok"):
+            print("daemon detenido")
+            return
+        sys.exit("no se pudo detener el daemon (¿está corriendo?)")
 
     if args.list:
         if not args.no_daemon:

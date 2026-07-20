@@ -22,6 +22,7 @@ SOCK_PATH = f"/tmp/axtree-{os.getuid()}.sock"
 
 CACHE = {}  # app_name.lower() -> {"walker": Walker, "pid": int, "header": str, "ts": float}
 LOCK = threading.Lock()
+SERVER = None  # seteado en main(); permite que el handler de "shutdown" pare serve_forever()
 
 
 def full_walk(app, el, menus, raw, max_nodes):
@@ -51,6 +52,15 @@ def handle(req):
         with LOCK:
             apps = list(CACHE.keys())
         return {"ok": True, "text": "pong", "cached_apps": apps}
+
+    if cmd == "shutdown":
+        if SERVER is not None:
+            # server.shutdown() bloquea hasta que serve_forever() termine; no se puede
+            # llamar desde el mismo thread que corre el loop (ni desde este thread de
+            # request, que moriría antes de que el loop llegue a chequear el flag), así
+            # que se dispara desde un thread aparte y se responde ok de inmediato.
+            threading.Thread(target=SERVER.shutdown, daemon=True).start()
+        return {"ok": True}
 
     app_name = req.get("app")
     if not app_name:
@@ -159,11 +169,13 @@ class Handler(socketserver.StreamRequestHandler):
 
 
 def main():
+    global SERVER
     if not ax.AXIsProcessTrusted():
         sys.exit("Sin permiso de Accesibilidad (System Settings → Privacy → Accessibility).")
     if os.path.exists(SOCK_PATH):
         os.remove(SOCK_PATH)
     server = socketserver.ThreadingUnixStreamServer(SOCK_PATH, Handler)
+    SERVER = server
     print(f"axtree daemon escuchando en {SOCK_PATH}", file=sys.stderr)
     try:
         server.serve_forever()
