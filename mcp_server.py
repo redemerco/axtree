@@ -68,19 +68,25 @@ def list_apps() -> str:
 
 @mcp.tool()
 def get_tree(app: str, under: str = "", menus: bool = False, raw: bool = False,
-             max_nodes: int = 1500, refresh: bool = False) -> str:
+             max_nodes: int = 1500, refresh: bool = False, fallback: bool = True) -> str:
     """Vuelca el árbol de accesibilidad de una app como texto: una línea por
     elemento con rol, label, value, acciones disponibles y su referencia [eN].
     Usá `under` con un eN de un dump previo para ver solo ese subárbol (más barato
     en tokens); ojo que esto reemplaza la vista cacheada de esa app hasta el
-    próximo `refresh=True`."""
-    w, header, cached, _ = get_cached(app, menus, raw, max_nodes, refresh)
+    próximo `refresh=True`. Si el árbol viene vacío o casi vacío (apps cuyo motor
+    de renderizado propio no expone accesibilidad, ej. Spotify), cae automáticamente
+    a un screenshot de la ventana — pasá `fallback=False` para desactivarlo."""
+    w, header, cached, app_obj = get_cached(app, menus, raw, max_nodes, refresh)
     if under:
         root = w.elements[parse_eid(w, under)]
         w2 = ax.Walker(flatten=not raw, max_nodes=max_nodes)
         w2.walk(root, 0)
         CACHE[app.lower()]["walker"] = w2
         w = w2
+    if fallback and ax.is_tree_empty(w):
+        el = ax.AXUIElementCreateApplication(app_obj.processIdentifier())
+        path = ax.screenshot_fallback(app_obj, el)
+        return f"{header}\n# árbol AX vacío para {app_obj.localizedName()} — fallback a screenshot: {path}"
     return f"{header}\n{chr(10).join(w.lines)}\n{stats_line(w, cached)}"
 
 

@@ -65,6 +65,7 @@ def build_parser():
     ap.add_argument("--refresh", action="store_true", help="ignorar cache del daemon, re-caminar el árbol")
     ap.add_argument("--no-daemon", action="store_true", help="ignorar el daemon aunque esté corriendo")
     ap.add_argument("--daemon-stop", action="store_true", help="apagar el daemon corriendo (shutdown limpio, borra el socket)")
+    ap.add_argument("--no-fallback", action="store_true", help="desactivar el fallback a screenshot cuando el árbol AX viene vacío")
     return ap
 
 
@@ -84,11 +85,22 @@ def run_standalone(args):
     print(f"# {app.localizedName()} (pid {app.processIdentifier()}) — {len(windows)} ventana(s)")
     for win in windows:
         w.walk(win, 0)
+
     if args.menus:
         mb = ax_attr(el, "AXMenuBar")
         if mb is not None:
             print("# menubar")
             w.walk(mb, 0)
+
+    # BUG real encontrado en revisión: este chequeo tiene que ir DESPUÉS de --menus,
+    # no antes. Apps como Spotify no exponen nada en AXWindows pero SÍ tienen un
+    # AXMenuBar real (8 items, confirmado a mano) — si el fallback corta acá antes de
+    # walkear los menús, `--menus` queda completamente ignorado y silencioso.
+    if not args.no_fallback and is_tree_empty(w):
+        path = screenshot_fallback(app, el)
+        print(f"# árbol AX vacío para {app.localizedName()} — fallback a screenshot: {path}")
+        print(f"# {w.count} nodos, ~0 tokens [standalone, sin daemon]", file=sys.stderr)
+        return
 
     def parse_eid(s):
         eid = int(str(s).lstrip("e"))

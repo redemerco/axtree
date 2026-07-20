@@ -1,4 +1,5 @@
 """ax_core — lógica AX compartida entre axtree.py (CLI) y daemon.py (server persistente)."""
+import subprocess
 import time
 
 import objc
@@ -14,6 +15,9 @@ from ApplicationServices import (
     AXObserverAddNotification,
     AXObserverRemoveNotification,
     AXObserverGetRunLoopSource,
+    AXValueGetValue,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
 )
 from AppKit import NSWorkspace
 from CoreFoundation import (
@@ -24,6 +28,7 @@ from CoreFoundation import (
     CFRunLoopRemoveSource,
     CFRunLoopGetCurrent,
 )
+import Quartz
 from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventKeyboardSetUnicodeString,
@@ -269,3 +274,108 @@ def find_app(name):
     exact = [a for a in apps if a.localizedName().lower() == name.lower()]
     partial = [a for a in apps if name.lower() in a.localizedName().lower()]
     return (exact or partial or [None])[0]
+
+
+# Subroles de chrome de ventana: no cuentan como "contenido" al evaluar si un
+# árbol vino vacío (algunas apps sin soporte AX real igual exponen estos tres).
+CHROME_SUBROLES = {"AXCloseButton", "AXFullScreenButton", "AXMinimizeButton", "AXZoomButton"}
+
+
+def content_node_count(w, limit=3):
+    """Cuenta nodos de contenido real en el walk `w` (excluye el propio AXWindow
+    y los botones de chrome). Corta apenas llega a `limit`: solo nos importa si
+    el árbol está vacío, no el conteo exacto."""
+    n = 0
+    for el in w.elements:
+        if ax_attr(el, "AXRole") == "AXWindow":
+            continue
+        if ax_attr(el, "AXSubrole") in CHROME_SUBROLES:
+            continue
+        n += 1
+        if n >= limit:
+            break
+    return n
+
+
+def is_tree_empty(w, min_content=3):
+    """True si el walk `w` tiene menos de `min_content` nodos de contenido real.
+    Pensado para apps cuyo motor de renderizado propio nunca implementó soporte
+    de accesibilidad (ej. Spotify): AXWindows viene vacío o solo trae los
+    botones estándar de la ventana, sin nada útil para un agente."""
+    return content_node_count(w, min_content) < min_content
+
+
+def _cgwindow_id(app_name):
+    """windowNumber de la ventana on-screen de `app_name` de MAYOR ÁREA, vía
+    CGWindowList — apps como Spotify no exponen NADA en AXWindows pero sí
+    tienen una ventana real en pantalla que CGWindowList sí ve. Devuelve el
+    kCGWindowNumber (no bounds: ver por qué en screenshot_fallback) o None.
+
+    BUG real encontrado en revisión: la primera coincidencia layer=0 suele ser
+    una franja angosta de 1470x33 (barra de estado/overlay), no la ventana de
+    contenido — hay que elegir por tamaño, no por orden."""
+    try:
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListExcludeDesktopElements, Quartz.kCGNullWindowID)
+    except Exception:
+        return None
+    best = None
+    for w in wins:
+        if w.get("kCGWindowOwnerName") == app_name and w.get("kCGWindowLayer") == 0:
+            b = w.get("kCGWindowBounds") or {}
+            width, height = b.get("Width"), b.get("Height")
+            if not width or not height:
+                continue
+            area = width * height
+            if best is None or area > best[0]:
+                best = (area, w.get("kCGWindowNumber"))
+    return best[1] if best else None
+
+
+def screenshot_fallback(app, el, path=None):
+    """Fallback para cuando el árbol AX viene vacío: captura un screenshot de
+    la ventana real de `app`. Preferencia de método:
+
+    1. `screencapture -l <windowNumber>` contra el ID de ventana real de
+       CGWindowList — BUG real encontrado en revisión: usar `-R x,y,w,h`
+       (recorte por REGIÓN de pantalla) captura lo que sea que esté
+       visualmente encima en esas coordenadas en ese instante, no el
+       contenido de la ventana en sí — si la ventana de la app está tapada
+       por otra (típico: la terminal desde la que se corre este comando
+       encima), el screenshot termina siendo de la ventana que tapa, no de
+       la app pedida. Capturar por windowNumber trae el contenido real de
+       esa ventana sin importar qué haya encima.
+    2. AXPosition/AXSize de AXWindows (desempaquetado vía AXValueGetValue)
+       recortado por región, si CGWindowList no encontró nada pero AX sí
+       reporta alguna ventana (mismo riesgo de oclusión que el punto 1, pero
+       es mejor que nada).
+    3. Pantalla completa como último recurso, si ninguna de las dos fuentes
+       tiene una ventana real (la app genuinamente no tiene nada visible) —
+       ojo que esto puede capturar contenido ajeno a la app pedida.
+
+    Devuelve la ruta del PNG guardado."""
+    if path is None:
+        safe_name = "".join(c if c.isalnum() else "_" for c in (app.localizedName() or "app"))
+        path = f"/tmp/axtree_fallback_{safe_name}_{int(time.time())}.png"
+
+    win_id = _cgwindow_id(app.localizedName())
+    cmd = ["screencapture", "-x"]
+    if win_id is not None:
+        cmd += ["-l", str(win_id)]
+    else:
+        bounds = None
+        windows = ax_attr(el, "AXWindows") or []
+        if windows:
+            pos = ax_attr(windows[0], "AXPosition")
+            size = ax_attr(windows[0], "AXSize")
+            if pos is not None and size is not None:
+                ok1, pt = AXValueGetValue(pos, kAXValueCGPointType, None)
+                ok2, sz = AXValueGetValue(size, kAXValueCGSizeType, None)
+                if ok1 and ok2:
+                    bounds = (pt.x, pt.y, sz.width, sz.height)
+        if bounds:
+            x, y, w, h = bounds
+            cmd += ["-R", f"{int(x)},{int(y)},{int(w)},{int(h)}"]
+    cmd.append(path)
+    subprocess.run(cmd, check=True)
+    return path
