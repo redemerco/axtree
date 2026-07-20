@@ -49,6 +49,25 @@ Salida: una línea por elemento — rol, label, value, acciones disponibles y su
 
 Si no está corriendo, `axtree.py` cae solo a modo standalone (cada llamada camina de cero).
 
+## Esperar cambios reales (AXObserver) en vez de sleep a ciegas
+
+Después de un `press` o `type_into`, buena parte del código (`benchmark.py`, `chat_driver.py`, `daemon.py`, `axtree.py`, `mcp_server.py`) usa `time.sleep(0.3..0.6)` a ciegas antes de volver a leer el estado: adivina cuánto tarda la app en re-renderizar. `ax_core.wait_for_notification(pid, element, notification, action=None, timeout=2.0)` reemplaza esa adivinanza por un `AXObserver` real: registra interés en una notificación AX (`AXValueChanged`, `AXUIElementDestroyed`, `AXFocusedUIElementChanged`, ...) sobre un elemento puntual, ejecuta `action` (típicamente el `AXUIElementPerformAction` que dispara el cambio) y bombea el run loop hasta que la propia app confirma el cambio o vence `timeout` (red de seguridad).
+
+Ojo con el orden: hay que registrar el observer **antes** de disparar la acción, no después — medido contra TextEdit, la notificación se postea de forma síncrona dentro del round-trip IPC de `AXUIElementPerformAction`, así que si se llama `perform_action()` y recién después `wait_for_notification(...)`, la notificación ya pasó y nunca llega (por eso `action` se ejecuta *adentro* de la función, con el observer ya enganchado).
+
+**Cuándo conviene**: esperar una mutación de UI puntual y específica disparada por la acción — un checkbox/radiobutton que cambia de valor, un elemento que se destruye, el foco que se mueve — sobre un elemento ya resuelto de antemano. Ahí el helper es correcto por construcción (no una lectura prematura) y normalmente más rápido que un sleep fijo pensado para el peor caso.
+
+**Cuándo NO hace falta**: una acción que no cambia nada observable vía AX en ese elemento (abrir un link externo, un botón que dispara una hoja de sistema fuera del árbol de esa app) — ahí un timeout chico sigue siendo lo más simple. Tampoco todas las apps postean todas las notificaciones para todos los elementos: algunos AX servers devuelven `kAXErrorNotificationUnsupported` (ej. los segmentos de un radiogroup de Finder) — en ese caso no hay señal real que escuchar y `wait_for_notification` devuelve `False` de inmediato en vez de quemar el timeout completo.
+
+Demo real en `examples/press_and_wait.py` (TextEdit corriendo, toggle de un checkbox de Preferencias, medido con `time.time()`):
+
+```
+[A] sleep(0.4) a ciegas:  0.5044s  →  value='1'  OK (cambió)
+[B] wait_for_notification:      0.1575s  →  value='1'  OK (cambió, notificación=True)
+
+=== 0.5044s (sleep fijo) vs 0.1575s (observer) → 3.2x, ambos con lectura correcta ===
+```
+
 ## Limitaciones conocidas
 
 - **Apps con renderizado propio no exponen nada** (ej. Spotify: solo la barra de menú). No hay fallback a screenshot todavía — es el próximo gap a cerrar.
