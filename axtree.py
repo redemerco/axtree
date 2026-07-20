@@ -63,6 +63,7 @@ def build_parser():
     ap.add_argument("--under", metavar="EID", help="dumpear solo el subárbol de ese elemento (renumera los eN)")
     ap.add_argument("--refresh", action="store_true", help="ignorar cache del daemon, re-caminar el árbol")
     ap.add_argument("--no-daemon", action="store_true", help="ignorar el daemon aunque esté corriendo")
+    ap.add_argument("--no-fallback", action="store_true", help="desactivar el fallback a screenshot cuando el árbol AX viene vacío")
     return ap
 
 
@@ -82,6 +83,13 @@ def run_standalone(args):
     print(f"# {app.localizedName()} (pid {app.processIdentifier()}) — {len(windows)} ventana(s)")
     for win in windows:
         w.walk(win, 0)
+
+    if not args.no_fallback and is_tree_empty(w):
+        path = screenshot_fallback(app, el)
+        print(f"# árbol AX vacío para {app.localizedName()} — fallback a screenshot: {path}")
+        print(f"# {w.count} nodos, ~0 tokens [standalone, sin daemon]", file=sys.stderr)
+        return
+
     if args.menus:
         mb = ax_attr(el, "AXMenuBar")
         if mb is not None:

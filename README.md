@@ -51,7 +51,7 @@ Si no está corriendo, `axtree.py` cae solo a modo standalone (cada llamada cami
 
 ## Limitaciones conocidas
 
-- **Apps con renderizado propio no exponen nada** (ej. Spotify: solo la barra de menú). No hay fallback a screenshot todavía — es el próximo gap a cerrar.
+- **Apps con renderizado propio no exponen nada** (ej. Spotify: solo la barra de menú, o directamente 0 ventanas en `AXWindows`). `get_tree` detecta el árbol vacío/casi vacío (menos de 3 nodos de contenido real, sin contar los botones de chrome de ventana) y cae automáticamente a un screenshot recortado a la ventana (`screenshot_fallback` en `ax_core.py`). Desactivable con `--no-fallback` (CLI) o `fallback=False` (MCP). Esto cubre `axtree.py` y `mcp_server.py`; si usás el daemon (`daemon.py`), ese camino todavía no tiene el fallback.
 - El daemon cachea la lista de apps corriendo al momento de resolver cada pedido; si una app tarda en terminar de arrancar puede no aparecer en el primer intento.
 - `--under` reemplaza la vista cacheada de esa app hasta un `--refresh` — es intencional (permite drill-down y clickear varias veces seguidas dentro de un subárbol) pero hay que saber "salir".
 - Escribir en campos que son WebView/contenteditable (ej. el editor de Notion) cae a simular teclado real, no a `AXValue` directo.

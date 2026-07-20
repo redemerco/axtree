@@ -1,4 +1,5 @@
 """ax_core — lógica AX compartida entre axtree.py (CLI) y daemon.py (server persistente)."""
+import subprocess
 import time
 
 from ApplicationServices import (
@@ -9,6 +10,9 @@ from ApplicationServices import (
     AXUIElementIsAttributeSettable,
     AXUIElementPerformAction,
     AXIsProcessTrusted,
+    AXValueGetValue,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
 )
 from AppKit import NSWorkspace
 from CoreFoundation import kCFBooleanTrue, CFRunLoopRunInMode, kCFRunLoopDefaultMode
@@ -191,3 +195,62 @@ def find_app(name):
     exact = [a for a in apps if a.localizedName().lower() == name.lower()]
     partial = [a for a in apps if name.lower() in a.localizedName().lower()]
     return (exact or partial or [None])[0]
+
+
+# Subroles de chrome de ventana: no cuentan como "contenido" al evaluar si un
+# árbol vino vacío (algunas apps sin soporte AX real igual exponen estos tres).
+CHROME_SUBROLES = {"AXCloseButton", "AXFullScreenButton", "AXMinimizeButton", "AXZoomButton"}
+
+
+def content_node_count(w, limit=3):
+    """Cuenta nodos de contenido real en el walk `w` (excluye el propio AXWindow
+    y los botones de chrome). Corta apenas llega a `limit`: solo nos importa si
+    el árbol está vacío, no el conteo exacto."""
+    n = 0
+    for el in w.elements:
+        if ax_attr(el, "AXRole") == "AXWindow":
+            continue
+        if ax_attr(el, "AXSubrole") in CHROME_SUBROLES:
+            continue
+        n += 1
+        if n >= limit:
+            break
+    return n
+
+
+def is_tree_empty(w, min_content=3):
+    """True si el walk `w` tiene menos de `min_content` nodos de contenido real.
+    Pensado para apps cuyo motor de renderizado propio nunca implementó soporte
+    de accesibilidad (ej. Spotify): AXWindows viene vacío o solo trae los
+    botones estándar de la ventana, sin nada útil para un agente."""
+    return content_node_count(w, min_content) < min_content
+
+
+def screenshot_fallback(app, el, path=None):
+    """Fallback para cuando el árbol AX viene vacío: captura un screenshot
+    recortado a los bounds de la primera ventana de `app` (AXPosition/AXSize,
+    desempaquetados de su AXValue opaco vía AXValueGetValue). Si la app no
+    tiene ninguna ventana en AXWindows, cae a un screenshot de pantalla
+    completa. Devuelve la ruta del PNG guardado."""
+    if path is None:
+        safe_name = "".join(c if c.isalnum() else "_" for c in (app.localizedName() or "app"))
+        path = f"/tmp/axtree_fallback_{safe_name}_{int(time.time())}.png"
+
+    bounds = None
+    windows = ax_attr(el, "AXWindows") or []
+    if windows:
+        pos = ax_attr(windows[0], "AXPosition")
+        size = ax_attr(windows[0], "AXSize")
+        if pos is not None and size is not None:
+            ok1, pt = AXValueGetValue(pos, kAXValueCGPointType, None)
+            ok2, sz = AXValueGetValue(size, kAXValueCGSizeType, None)
+            if ok1 and ok2:
+                bounds = (pt.x, pt.y, sz.width, sz.height)
+
+    cmd = ["screencapture", "-x"]
+    if bounds:
+        x, y, w, h = bounds
+        cmd += ["-R", f"{int(x)},{int(y)},{int(w)},{int(h)}"]
+    cmd.append(path)
+    subprocess.run(cmd, check=True)
+    return path
