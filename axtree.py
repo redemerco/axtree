@@ -84,17 +84,21 @@ def run_standalone(args):
     for win in windows:
         w.walk(win, 0)
 
-    if not args.no_fallback and is_tree_empty(w):
-        path = screenshot_fallback(app, el)
-        print(f"# árbol AX vacío para {app.localizedName()} — fallback a screenshot: {path}")
-        print(f"# {w.count} nodos, ~0 tokens [standalone, sin daemon]", file=sys.stderr)
-        return
-
     if args.menus:
         mb = ax_attr(el, "AXMenuBar")
         if mb is not None:
             print("# menubar")
             w.walk(mb, 0)
+
+    # BUG real encontrado en revisión: este chequeo tiene que ir DESPUÉS de --menus,
+    # no antes. Apps como Spotify no exponen nada en AXWindows pero SÍ tienen un
+    # AXMenuBar real (8 items, confirmado a mano) — si el fallback corta acá antes de
+    # walkear los menús, `--menus` queda completamente ignorado y silencioso.
+    if not args.no_fallback and is_tree_empty(w):
+        path = screenshot_fallback(app, el)
+        print(f"# árbol AX vacío para {app.localizedName()} — fallback a screenshot: {path}")
+        print(f"# {w.count} nodos, ~0 tokens [standalone, sin daemon]", file=sys.stderr)
+        return
 
     def parse_eid(s):
         eid = int(str(s).lstrip("e"))
