@@ -1,6 +1,7 @@
 """ax_core — lógica AX compartida entre axtree.py (CLI) y daemon.py (server persistente)."""
 import time
 
+import objc
 from ApplicationServices import (
     AXUIElementCreateApplication,
     AXUIElementCopyAttributeValue,
@@ -9,9 +10,20 @@ from ApplicationServices import (
     AXUIElementIsAttributeSettable,
     AXUIElementPerformAction,
     AXIsProcessTrusted,
+    AXObserverCreate,
+    AXObserverAddNotification,
+    AXObserverRemoveNotification,
+    AXObserverGetRunLoopSource,
 )
 from AppKit import NSWorkspace
-from CoreFoundation import kCFBooleanTrue, CFRunLoopRunInMode, kCFRunLoopDefaultMode
+from CoreFoundation import (
+    kCFBooleanTrue,
+    CFRunLoopRunInMode,
+    kCFRunLoopDefaultMode,
+    CFRunLoopAddSource,
+    CFRunLoopRemoveSource,
+    CFRunLoopGetCurrent,
+)
 from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventKeyboardSetUnicodeString,
@@ -174,6 +186,72 @@ def type_into(el, pid, text):
             return "AXValue"
     cg_type(pid, text)
     return "CGEvent-fallback" + ("" if typed_ok(el, text) else " (sin verificar)")
+
+
+def wait_for_notification(pid, element, notification, action=None, timeout=2.0):
+    """Bloquea hasta que `element` emita `notification` (ej. kAXValueChangedNotification,
+    kAXUIElementDestroyedNotification, kAXFocusedUIElementChangedNotification) o hasta
+    `timeout` segundos. Devuelve True si la notificación llegó, False si venció el timeout
+    (o si la app ni siquiera soporta esa notificación en ese elemento — ver nota abajo).
+
+    `action`, si se pasa, es un callable sin argumentos que dispara la mutación (típicamente
+    `lambda: AXUIElementPerformAction(el, "AXPress")`). Es OBLIGATORIO pasarlo así en vez de
+    hacer `perform_action(); wait_for_notification(...)` en dos pasos: medido contra apps
+    reales (TextEdit), la notificación se postea de forma SÍNCRONA dentro del round-trip IPC
+    de AXUIElementPerformAction — si el observer se registra después de que la acción ya
+    volvió, la notificación ya pasó y se pierde para siempre (el valor terminaba cambiando
+    igual, pero `wait_for_notification` colgaba hasta el timeout completo por escuchar tarde).
+    Por eso acá se registra el observer y se agrega el run loop source ANTES de ejecutar
+    `action`, y recién ahí se empieza a bombear el run loop.
+
+    Reemplaza el patrón `perform_action(); time.sleep(N); re-leer estado`: en vez de
+    adivinar cuánto tarda la app en re-renderizar, escuchamos el AXObserver real de esa
+    app y volvemos apenas la UI confirma el cambio (o al timeout como red de seguridad).
+
+    Cuándo conviene: esperar una mutación de UI específica y puntual disparada por la
+    propia acción (un value que cambia, un elemento que se destruye, el foco que se
+    mueve) sobre un elemento que ya tenés resuelto de antemano.
+    Cuándo NO hace falta: una acción que no cambia nada observable via AX (ej. abrir un
+    link externo, un botón "Compartir" que dispara una hoja de sistema fuera del árbol
+    de esa app) — ahí un timeout fijo chico sigue siendo lo más simple, o directamente
+    no hace falta esperar nada.
+
+    Nota: no todas las apps postean todas las notificaciones para todos los elementos
+    (algunos AX servers devuelven kAXErrorNotificationUnsupported, ej. los segmentos de
+    un radiogroup de Finder) — ahí no hay señal real que escuchar y esto devuelve False
+    de inmediato en vez de quemar el timeout completo.
+    """
+    fired = {"v": False}
+
+    @objc.callbackFor(AXObserverCreate)
+    def _callback(observer, elem, notif, refcon):
+        fired["v"] = True
+
+    err, observer = AXObserverCreate(pid, _callback, None)
+    if err != 0 or observer is None:
+        return False
+
+    err = AXObserverAddNotification(observer, element, notification, None)
+    if err != 0:
+        return False  # esta app/elemento no postea esta notificación: no hay nada que esperar
+
+    source = AXObserverGetRunLoopSource(observer)
+    run_loop = CFRunLoopGetCurrent()
+    CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode)
+    try:
+        if action is not None:
+            action()
+        deadline = time.time() + timeout
+        while not fired["v"]:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, min(remaining, 0.05), False)
+    finally:
+        CFRunLoopRemoveSource(run_loop, source, kCFRunLoopDefaultMode)
+        AXObserverRemoveNotification(observer, element, notification)
+
+    return fired["v"]
 
 
 def pump_runloop(seconds=0.05):
