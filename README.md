@@ -68,6 +68,33 @@ Demo real en `examples/press_and_wait.py` (TextEdit corriendo, toggle de un chec
 === 0.5044s (sleep fijo) vs 0.1575s (observer) → 3.2x, ambos con lectura correcta ===
 ```
 
+## Resolver por descripción, no por eid (`find`/`act`)
+
+Los `eid` ([e42]) son índices de UN dump puntual — si la UI muta entre el dump y la acción, pueden terminar apuntando a otra cosa sin ningún error. `resolve.py` ataca esto resolviendo por descripción en lenguaje natural ("el botón de sumar", "campo de búsqueda") en vez de por posición:
+
+```python
+import resolve
+resolve.act("Calculadora", "el botón de sumar", action="AXPress")
+```
+
+`act()` camina el árbol fresco, puntúa cada nodo (fuzzy word-level + sinónimos de rol + números escritos con letras → dígito) y ejecuta en la MISMA llamada — nunca guarda un eid entre turnos, así que no hay ventana para que la UI mute en el medio. Expuesto también como tools MCP: `find(app, query)` para explorar candidatos, `act(app, query, action=..., text=..., key=...)` para resolver+actuar. Validado en vivo: `5 + 3 =` completo en Calculadora usando solo `"botón cinco"`, `"el botón de sumar"`, `"botón tres"`, `"el botón de igual"`.
+
+Límite conocido: controles solo-ícono sin ningún label de texto quedan a merced de heurísticas de sinónimo de rol — para esos casos, un eid de un dump fresco sigue siendo más preciso.
+
+## Grabar interacción humana (`ax_recorder.py`)
+
+El inverso de lo que hace axtree: en vez de ejecutar acciones, escucha lo que un humano hace de verdad (clicks + tipeo) y lo reconstruye como script `press`/`type_into` reproducible. Combina un `AXObserver` registrado sobre la app entera (no un control puntual) con un `CGEventTap` global para identificar qué se clickeó por hit-testing de coordenadas.
+
+```python
+from ax_recorder import Recorder, reconstruct_script
+events = Recorder(pid).record(duration=5.0)
+script = reconstruct_script(events)
+```
+
+Demo real en `examples/demo_recorder.py`: graba una sesión sintética en TextEdit (click + tipeo + click en un botón, todo con eventos de sesión reales, no AX directo) y reconstruye exactamente `type_into textarea "Hola recorder"` / `press button`, capturando fielmente hasta el autocorrect de la app. Ningún competidor mencionado abajo ofrece esto — todos son solo-ejecución.
+
+Limitaciones: el `CGEventTap` es session-wide (no filtrado por pid — un click en otra app también se hit-testea), y una app en fullscreen nativo mueve su ventana a otro Space, lo que puede confundir el hit-testing.
+
 ## Limitaciones conocidas
 
 - **Apps con renderizado propio no exponen nada** (ej. Spotify: solo la barra de menú, o directamente 0 ventanas en `AXWindows`). `get_tree` detecta el árbol vacío/casi vacío (menos de 3 nodos de contenido real, sin contar los botones de chrome de ventana) y cae automáticamente a un screenshot recortado a la ventana (`screenshot_fallback` en `ax_core.py`). Desactivable con `--no-fallback` (CLI) o `fallback=False` (MCP). Esto cubre `axtree.py` y `mcp_server.py`; si usás el daemon (`daemon.py`), ese camino todavía no tiene el fallback.

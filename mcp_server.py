@@ -8,6 +8,7 @@ daemon.py separado cuando se usa vía MCP.
 import time
 
 import ax_core as ax
+import resolve as ax_resolve
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("axtree")
@@ -127,6 +128,33 @@ def read_value(app: str, eid: str) -> str:
     i = parse_eid(w, eid)
     val = ax.ax_attr(w.elements[i], "AXValue")
     return "" if val is None else str(val)
+
+
+@mcp.tool()
+def find(app: str, query: str, top_k: int = 3, menus: bool = False) -> str:
+    """Busca un elemento por descripción en lenguaje natural (ej. "el botón de
+    guardar", "campo de búsqueda") en vez de por eid. Camina el árbol fresco
+    (no usa el cache de get_tree/press) y devuelve los top_k candidatos con su
+    score — útil para explorar antes de decidir qué acción tomar con `act`."""
+    app_obj, top = ax_resolve.resolve(app, query, top_k=top_k, menus=menus)
+    return "\n".join(f"{s:.2f}  {line}" for s, _, line, _ in top)
+
+
+@mcp.tool()
+def act(app: str, query: str, action: str = "AXPress", text: str = "", key: str = "",
+        min_score: float = 0.35, menus: bool = False) -> str:
+    """Resuelve `query` (descripción en lenguaje natural) y ejecuta la acción en
+    la MISMA llamada — walk fresco, sin depender de ningún eid cacheado de un
+    turno anterior. Preferible a press/type_into cuando la UI pudo haber
+    mutado desde el último get_tree, ya que evita el problema de que un eid
+    quede apuntando a otra cosa. `text` (opcional) tipea en el elemento
+    encontrado; `key` (opcional) manda una tecla después."""
+    try:
+        r = ax_resolve.act(app, query, action=action or None, text=text or None,
+                            key=key or None, min_score=min_score, menus=menus)
+    except ValueError as e:
+        raise ValueError(str(e))
+    return f"OK (score={r['score']:.2f}) → {r['line']}"
 
 
 if __name__ == "__main__":
