@@ -45,6 +45,11 @@ DANGER_WORDS = [
     "pagar", "pay", "comprar", "purchase", "buy", "checkout",
     "confirmar", "confirm", "aceptar", "llamar", "call", "marcar",
     "bloquear", "block", "denunciar", "report",
+    # BUG real: el patrón #3 (elementos tempranos en el árbol) agarró los
+    # controles del mini-reproductor de Podcasts — "Reproducir" arrancaría
+    # audio de forma audible sin que nadie lo haya pedido. No es destructivo,
+    # pero es una sorpresa perceptible que el crawler no debería causar solo.
+    "reproducir", "play", "reproducción", "grabar", "record",
 ]
 DANGER_RE = re.compile("|".join(re.escape(w) for w in DANGER_WORDS), re.IGNORECASE)
 
@@ -118,9 +123,13 @@ def _has_nav_ancestor(el, max_depth=6):
 
 def _row_label(el):
     """Mejor label disponible para una AXRow: su propio título/descripción, o
-    si no tiene, el primer statictext/texto entre sus descendientes (BUG real
-    encontrado en vivo con Notas: la fila no tiene label propio, el texto
-    vive en un statictext hijo — mismo patrón que Ajustes del Sistema)."""
+    si no tiene, el primer texto entre sus descendientes (BUG real encontrado
+    en vivo, dos variantes distintas del mismo problema de fondo — la fila no
+    tiene label propio:
+    - Notas: el label vivía en AXTitle/AXDescription de un descendiente.
+    - Finder: el label vivía en AXVALUE de un statictext hijo (describe()
+      separa label y value; mirar solo `label` los deja afuera). Hay que
+      revisar las dos cosas, no solo `label`."""
     label = ax.ax_attr(el, "AXTitle") or ax.ax_attr(el, "AXDescription")
     if label:
         return label
@@ -129,21 +138,35 @@ def _row_label(el):
     while stack and seen < 20:
         child = stack.pop(0)
         seen += 1
-        role, clabel, value, extras = ax.describe(child)
-        if clabel:
-            return clabel
+        role, clabel, cvalue, extras = ax.describe(child)
+        text = clabel or (cvalue if isinstance(cvalue, str) else None)
+        if text:
+            return text
         stack.extend(ax.ax_attr(child, "AXChildren") or [])
     return None
+
+
+EARLY_POSITION_LIMIT = 11  # ver 3er patrón abajo
 
 
 def find_nav_containers(w):
     """Índices (y su label de navegación) de elementos dentro de un contenedor
     de navegación reconocible (sidebar/outline o el grupo de navegación
     principal) — es lo único que el crawler recorre, no cualquier botón del
-    contenido. Dos patrones cubiertos:
-    1. Elemento con acción Press directamente (botones de tab, ej. WhatsApp).
+    contenido. Tres patrones cubiertos:
+    1. Elemento con acción Press directamente, con un ancestro etiquetado
+       como nav (botones de tab, ej. WhatsApp).
     2. AXRow sin Press (outline de sidebar, ej. Ajustes del Sistema / Notas) —
-       nav_step ya sabe navegar esto vía AXSelectedRows en el contenedor."""
+       nav_step ya sabe navegar esto vía AXSelectedRows en el contenedor.
+    3. Elemento con Press que aparece TEMPRANO en el árbol (primeros
+       EARLY_POSITION_LIMIT nodos) pero sin ancestro etiquetado — BUG real
+       encontrado en Podcasts: el grupo que agrupa "Buscar"/"Inicio"/
+       "Novedades" es anónimo (axtree lo aplana en el texto, pero a nivel AX
+       real sigue sin label ni rol reconocible). En casi toda app de escritorio
+       la barra de nav se renderiza primero en el árbol — es una señal
+       posicional, no estructural, y por eso más débil: si el click no
+       produce un cambio real de pantalla (verificado después por
+       screen_fingerprint), simplemente no cuenta como ruta y no hace daño."""
     candidates = []
     seen_labels = set()
     for i, el in enumerate(w.elements):
@@ -163,7 +186,7 @@ def find_nav_containers(w):
             continue
         if label in seen_labels:
             continue
-        if _has_nav_ancestor(el):
+        if _has_nav_ancestor(el) or i < EARLY_POSITION_LIMIT:
             candidates.append((i, label))
             seen_labels.add(label)
     return candidates
@@ -184,7 +207,7 @@ def crawl(app_name, max_depth=2, max_screens=25, pause=0.5):
     def explore(breadcrumbs, depth):
         if len(discovered) >= max_screens or depth > max_depth:
             return
-        app, w = resolve.walk_app(app_name)
+        app, w = resolve.walk_app(app_name, max_nodes=300)
         fp = screen_fingerprint(w)
         if fp in visited:
             return
@@ -196,14 +219,14 @@ def crawl(app_name, max_depth=2, max_screens=25, pause=0.5):
             if is_dangerous(label):
                 skipped_dangerous.append(label)
                 continue
-            app2, w2 = resolve.walk_app(app_name)
+            app2, w2 = resolve.walk_app(app_name, max_nodes=300)
             before_fp = screen_fingerprint(w2)
             try:
-                r = resolve.nav_step(app_name, label, min_score=0.8)
+                r = resolve.nav_step(app_name, label, min_score=0.65)
             except ValueError:
                 continue
             time.sleep(pause)
-            app3, w3 = resolve.walk_app(app_name)
+            app3, w3 = resolve.walk_app(app_name, max_nodes=300)
             after_fp = screen_fingerprint(w3)
             if after_fp != before_fp and after_fp not in visited:
                 explore(breadcrumbs + [label], depth + 1)
@@ -211,12 +234,12 @@ def crawl(app_name, max_depth=2, max_screens=25, pause=0.5):
                 if home:
                     for step in home:
                         try:
-                            resolve.nav_step(app_name, step, min_score=0.8)
+                            resolve.nav_step(app_name, step, min_score=0.65)
                             time.sleep(pause)
                         except ValueError:
                             break
 
-    app0, w0 = resolve.walk_app(app_name)
+    app0, w0 = resolve.walk_app(app_name, max_nodes=300)
     home_fp = screen_fingerprint(w0)
     home = []  # desde la pantalla inicial, sin breadcrumbs previos
     explore([], 0)
