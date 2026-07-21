@@ -15,7 +15,9 @@ import re
 import time
 
 import ax_core as ax
+import atlas
 from AppKit import NSApplicationActivateIgnoringOtherApps
+from ApplicationServices import AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType
 
 ROLE_SYNONYMS = {
     "button": "button", "botón": "button", "boton": "button",
@@ -168,3 +170,136 @@ def act(app_name, query, action=None, text=None, key=None, min_score=0.35, menus
     if key:
         ax.cg_key(app.processIdentifier(), key)
     return result
+
+
+def nav_step(app_name, query, min_score=0.5, menus=False):
+    """Un paso de navegación intermedio (no el objetivo final): resuelve `query`
+    y prueba AXPress; si el elemento no tiene esa acción (filas de sidebar/outline
+    SIN Press, ej. la sidebar de Ajustes del Sistema), selecciona la fila de la
+    forma correcta.
+
+    BUG real que costó encontrar: la fila (AXRow) tiene un atributo `AXSelected`
+    que parece el lugar obvio para escribir, pero setearlo ahí NO dispara la
+    navegación (es de solo-reflejo en muchos NSOutlineView). La selección real
+    vive en el CONTENEDOR (el AXOutline padre), vía su atributo `AXSelectedRows`
+    — hay que pasarle una lista con la fila. Confirmado con Accessibility
+    Inspector: la API sí lo expone bien, el bug estaba en escribir en el
+    elemento equivocado, no en la API."""
+    app, top = resolve(app_name, query, top_k=3, menus=menus)
+    if not top or top[0][0] < min_score:
+        alts = "\n".join(f"  {s:.2f}  {line}" for s, _, line, _ in top)
+        raise ValueError(f"Sin match confiable para {query!r} (mejor score "
+                          f"{top[0][0]:.2f} < {min_score}).\nCandidatos:\n{alts}")
+    score, idx, line, el = top[0]
+    if "AXPress" in ax.ax_actions(el):
+        err = ax.AXUIElementPerformAction(el, "AXPress")
+        return {"score": score, "line": line, "action_err": err}
+
+    # buscar la fila (AXRow) ancestro más cercana y su AXOutline contenedor
+    row = el
+    while row is not None and ax.ax_attr(row, "AXRole") != "AXRow":
+        row = ax.ax_attr(row, "AXParent")
+    if row is None:
+        err = ax.AXUIElementSetAttributeValue(el, "AXSelected", True)
+        return {"score": score, "line": line, "action_err": err}
+
+    outline = ax.ax_attr(row, "AXParent")
+    while outline is not None and ax.ax_attr(outline, "AXRole") not in ("AXOutline", "AXTable"):
+        outline = ax.ax_attr(outline, "AXParent")
+    if outline is None:
+        err = ax.AXUIElementSetAttributeValue(row, "AXSelected", True)
+    else:
+        err = ax.AXUIElementSetAttributeValue(outline, "AXSelectedRows", [row])
+    return {"score": score, "line": line, "action_err": err}
+
+
+def _scroll_point(app_name):
+    """Punto (x, y) para scrollear el contenido de la ventana principal de la
+    app — un poco más abajo del centro, para no caer sobre un header fijo."""
+    app = ax.find_app(app_name)
+    if app is None:
+        return None
+    el = ax.AXUIElementCreateApplication(app.processIdentifier())
+    windows = ax.ax_attr(el, "AXWindows") or []
+    if not windows:
+        return None
+    pos = ax.ax_attr(windows[0], "AXPosition")
+    size = ax.ax_attr(windows[0], "AXSize")
+    if pos is None or size is None:
+        return None
+    ok1, pt = AXValueGetValue(pos, kAXValueCGPointType, None)
+    ok2, sz = AXValueGetValue(size, kAXValueCGSizeType, None)
+    if not (ok1 and ok2):
+        return None
+    return (pt.x + sz.width / 2, pt.y + sz.height * 0.6)
+
+
+def discover_and_act(app_name, task, breadcrumbs, query, action="AXPress", text=None, key=None,
+                      max_scrolls=8, min_score=0.5, remember_route=True):
+    """Ejecuta `breadcrumbs` (pasos previos de navegación, en orden), busca
+    `query` reintentando con scroll si hace falta (contenido perezoso: el
+    control puede no existir todavía en el árbol hasta que se scrollea hasta
+    ahí), actúa, y GUARDA la ruta completa en el atlas bajo `task` — la
+    próxima vez que se pida ese `task` en esta app, `smart_act` la reproduce
+    sin necesitar breadcrumbs/query de nuevo ni redescubrir el scroll."""
+    for step in breadcrumbs:
+        nav_step(app_name, step)
+        time.sleep(0.6)
+
+    scrolls_done = 0
+    app, top = resolve(app_name, query, top_k=3)
+    while (not top or top[0][0] < min_score) and scrolls_done < max_scrolls:
+        pt = _scroll_point(app_name)
+        if pt is None:
+            break
+        ax.scroll_at(*pt, clicks=10)
+        time.sleep(0.4)
+        scrolls_done += 1
+        app, top = resolve(app_name, query, top_k=3)
+
+    if not top or top[0][0] < min_score:
+        alts = "\n".join(f"  {s:.2f}  {line}" for s, _, line, _ in top) if top else "(nada)"
+        raise ValueError(f"Sin match confiable para {query!r} tras {scrolls_done} scrolls "
+                          f"(mejor score {(top[0][0] if top else 0):.2f} < {min_score}).\n{alts}")
+
+    score, idx, line, el = top[0]
+    result = {"score": score, "line": line, "scrolls": scrolls_done}
+    if action:
+        result["action_err"] = ax.AXUIElementPerformAction(el, action)
+    if text is not None:
+        result["type_method"] = ax.type_into(el, app.processIdentifier(), text)
+    if key:
+        ax.cg_key(app.processIdentifier(), key)
+
+    if remember_route:
+        atlas.remember(app_name, task, {
+            "breadcrumbs": breadcrumbs, "scrolls": scrolls_done, "query": query,
+            "action": action, "key": key,
+        })
+    return result
+
+
+def smart_act(app_name, task, breadcrumbs=None, query=None, action="AXPress", text=None, key=None,
+              max_scrolls=8, min_score=0.5):
+    """Punto de entrada recomendado para tareas recurrentes. Si `task` ya se
+    recorrió antes en `app_name` (está en atlas.json), reproduce esa ruta
+    directamente: no hace falta pasar breadcrumbs/query de nuevo. La primera
+    vez que se pide un `task` nuevo, hace falta pasar `breadcrumbs` (la lista
+    de pasos previos, ej. ["Accesibilidad", "Pantalla"]) y `query` (la
+    descripción del control final) para descubrirla — a partir de ahí queda
+    guardada para siempre (hasta que la app cambie de versión y deje de
+    andar, en cuyo caso se re-descubre sola con lo que se haya pasado)."""
+    route = atlas.recall(app_name, task)
+    if route:
+        try:
+            return discover_and_act(
+                app_name, task, route["breadcrumbs"], route["query"],
+                action=route.get("action", action), text=text, key=route.get("key", key),
+                max_scrolls=route.get("scrolls", 0) + 2, min_score=min_score, remember_route=True)
+        except ValueError:
+            pass  # la ruta guardada dejó de andar (la app cambió) -> redescubrir abajo
+    if breadcrumbs is None or query is None:
+        raise ValueError(f"No hay ruta guardada para {task!r} en {app_name!r} — "
+                          f"pasá breadcrumbs y query la primera vez para descubrirla.")
+    return discover_and_act(app_name, task, breadcrumbs, query, action=action, text=text,
+                             key=key, max_scrolls=max_scrolls, min_score=min_score)

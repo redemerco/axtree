@@ -259,6 +259,26 @@ def wait_for_notification(pid, element, notification, action=None, timeout=2.0):
     return fired["v"]
 
 
+def scroll_at(x, y, clicks=10, direction="down"):
+    """Scroll sintético (rueda del mouse) en (x, y). No hay acción AX universal
+    para 'bajar la lista' — muchas apps ni siquiera exponen un AXScrollBar
+    accionable — así que esto simula lo mismo que haría un humano con la rueda,
+    igual que ya se usa CGEvent como fallback para tipear cuando AX no alcanza.
+
+    BUG real encontrado en vivo: CGEventCreateScrollWheelEvent NO lleva
+    coordenadas propias — el scroll se aplica donde esté el cursor REAL en ese
+    momento (a diferencia de un click, que sí se postea a una posición
+    explícita). Sin mover el mouse primero, terminaba scrolleando el panel
+    equivocado (la sidebar en vez del contenido) porque el cursor había
+    quedado ahí de una interacción anterior."""
+    move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (x, y), 0)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+    time.sleep(0.05)
+    delta = -clicks if direction == "down" else clicks
+    ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, delta)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
 def pump_runloop(seconds=0.05):
     """NSWorkspace.runningApplications() se alimenta de notificaciones distribuidas;
     un proceso de larga vida sin run loop propio (como el daemon) nunca las procesa
